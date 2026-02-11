@@ -58,20 +58,10 @@
                 </button>
             </div>
 
-            <!-- Instagram Login Button -->
-            <div class="ig-login-section">
-                <button type="button" class="ig-login-btn" id="ig-login-btn" onclick="openLoginModal()">
-                    <svg class="ig-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                        <path
-                            d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
-                    </svg>
-                    <span id="ig-login-text">Continue with Instagram</span>
-                </button>
-                <div class="ig-login-status" id="ig-login-status" style="display: none;">
-                    <span class="ig-status-dot"></span>
-                    <span id="ig-logged-user"></span>
-                    <button class="ig-logout-btn" onclick="igLogout()">Disconnect</button>
-                </div>
+            <!-- API Status Indicator -->
+            <div class="api-status">
+                <span class="api-dot"></span>
+                <span>Powered by Instagram API — No rate limits</span>
             </div>
 
             <div class="features">
@@ -159,58 +149,14 @@
         <!-- Footer -->
         <footer class="footer">
             <p>⚠️ For personal use only. Respect content creators' rights.</p>
-            <p>Powered by <a href="https://github.com/yt-dlp/yt-dlp" target="_blank">yt-dlp</a> • Works best with login
+            <p>Powered by <a href="https://rapidapi.com" target="_blank">RapidAPI</a> • Works on public profiles
             </p>
         </footer>
     </main>
 
-    <!-- Instagram Login Modal -->
-    <div class="modal-overlay" id="modal-overlay" onclick="closeLoginModal(event)">
-        <div class="modal" onclick="event.stopPropagation()">
-            <div class="modal-header">
-                <svg viewBox="0 0 24 24" width="32" height="32" fill="url(#ig-gradient)">
-                    <defs>
-                        <linearGradient id="ig-gradient" x1="0%" y1="100%" x2="100%" y2="0%">
-                            <stop offset="0%" stop-color="#feda75" />
-                            <stop offset="25%" stop-color="#fa7e1e" />
-                            <stop offset="50%" stop-color="#d62976" />
-                            <stop offset="75%" stop-color="#962fbf" />
-                            <stop offset="100%" stop-color="#4f5bd5" />
-                        </linearGradient>
-                    </defs>
-                    <path
-                        d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
-                </svg>
-                <h3>Log in to Instagram</h3>
-                <p>Connect your account for unlimited downloads</p>
-                <button class="modal-close" onclick="closeLoginModal()">✕</button>
-            </div>
-            <div class="modal-body">
-                <div class="modal-input-group">
-                    <input type="text" id="ig-username" placeholder="Phone number, username, or email"
-                        autocomplete="username">
-                    <input type="password" id="ig-password" placeholder="Password" autocomplete="current-password">
-                </div>
-                <button class="modal-login-btn" id="modal-login-btn" onclick="igLogin()">
-                    Log In
-                </button>
-                <div class="modal-divider"><span>Why login?</span></div>
-                <div class="modal-benefits">
-                    <div class="modal-benefit">✅ Bypass Instagram rate limits</div>
-                    <div class="modal-benefit">✅ Access private profiles you follow</div>
-                    <div class="modal-benefit">✅ Download unlimited reels</div>
-                </div>
-                <div class="modal-disclaimer">
-                    🔒 Your credentials are only used to create a session and are never stored.
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script>
         let currentTaskId = null;
         let eventSource = null;
-        let igCredentials = { username: null, password: null };
 
         const inputSection = document.getElementById("input-section");
         const progressSection = document.getElementById("progress-section");
@@ -219,41 +165,6 @@
         usernameInput.addEventListener("keydown", (e) => {
             if (e.key === "Enter") startDownload();
         });
-
-        // --- Instagram Login Modal ---
-        function openLoginModal() {
-            document.getElementById("modal-overlay").classList.add("active");
-            document.getElementById("ig-username").focus();
-        }
-
-        function closeLoginModal(e) {
-            if (e && e.target !== e.currentTarget) return;
-            document.getElementById("modal-overlay").classList.remove("active");
-        }
-
-        function igLogin() {
-            const u = document.getElementById("ig-username").value.trim();
-            const p = document.getElementById("ig-password").value.trim();
-            if (!u || !p) return;
-
-            igCredentials = { username: u, password: p };
-
-            // Update UI to show connected state
-            document.getElementById("ig-login-btn").style.display = "none";
-            const status = document.getElementById("ig-login-status");
-            status.style.display = "flex";
-            document.getElementById("ig-logged-user").textContent = `@${u}`;
-
-            closeLoginModal();
-        }
-
-        function igLogout() {
-            igCredentials = { username: null, password: null };
-            document.getElementById("ig-login-btn").style.display = "flex";
-            document.getElementById("ig-login-status").style.display = "none";
-            document.getElementById("ig-username").value = "";
-            document.getElementById("ig-password").value = "";
-        }
 
         // --- Download ---
         async function startDownload() {
@@ -273,16 +184,10 @@
             document.getElementById("stats-row").style.display = "none";
 
             try {
-                const body = { username };
-                if (igCredentials.username) {
-                    body.ig_username = igCredentials.username;
-                    body.ig_password = igCredentials.password;
-                }
-
                 const res = await fetch("/download", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body),
+                    body: JSON.stringify({ username }),
                 });
 
                 const data = await res.json();
@@ -382,16 +287,6 @@
             document.getElementById("progress-fill").classList.remove("done");
             document.getElementById("progress-text").textContent = "0%";
         }
-
-        // Close modal on Escape
-        document.addEventListener("keydown", (e) => {
-            if (e.key === "Escape") closeLoginModal();
-        });
-
-        // Enter in password field triggers login
-        document.getElementById("ig-password").addEventListener("keydown", (e) => {
-            if (e.key === "Enter") igLogin();
-        });
     </script>
 </body>
 

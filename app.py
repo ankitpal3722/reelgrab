@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Instagram Reel Downloader — Web App
-Uses yt-dlp (primary) + instaloader (fallback) with login support.
+Uses RapidAPI Instagram Scraper for reliable cloud-based downloading.
 """
 
 import os
@@ -13,8 +13,8 @@ import zipfile
 import threading
 import time
 import random
-import subprocess
 import re
+import requests as http_requests
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, Response, send_file, stream_with_context
@@ -28,9 +28,16 @@ tasks_lock = threading.Lock()
 TASK_TTL_SECONDS = 1800
 DOWNLOAD_DIR = Path("/tmp/insta_downloads")
 
+# RapidAPI configuration
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
+
+# API endpoints (Instagram Scraper API2)
+RAPIDAPI_HOST = "instagram-scraper-api2.p.rapidapi.com"
+RAPIDAPI_BASE = f"https://{RAPIDAPI_HOST}/v1"
+
 
 class WebReelDownloader:
-    """Downloads Instagram reels using yt-dlp with instaloader metadata."""
+    """Downloads Instagram reels using RapidAPI Instagram Scraper."""
 
     def __init__(self, task_id: str):
         self.task_id = task_id
@@ -57,98 +64,157 @@ class WebReelDownloader:
             filename = filename[:150]
         return filename.strip(' _')
 
+    def _api_request(self, endpoint: str, params: dict = None):
+        """Make a request to the RapidAPI Instagram Scraper."""
+        headers = {
+            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": RAPIDAPI_HOST,
+        }
+        url = f"{RAPIDAPI_BASE}/{endpoint}"
+        resp = http_requests.get(url, headers=headers, params=params or {}, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
     def download_reels(self, username: str, ig_username: str = None, ig_password: str = None):
-        """Download all reels from a profile."""
+        """Download all reels from a profile using RapidAPI."""
         try:
-            self._update(status="fetching", progress=0)
+            if not RAPIDAPI_KEY:
+                self._update(
+                    status="error",
+                    error="RapidAPI key not configured. Set RAPIDAPI_KEY environment variable on Render.",
+                )
+                self._add_message("❌ No API key! Add RAPIDAPI_KEY in Render settings.")
+                return
+
+            self._update(status="fetching", progress=5)
             self._add_message(f"🔍 Fetching reels from @{username}...")
-            self._add_message("📡 Using yt-dlp engine (better rate limit handling)...")
+            self._add_message("📡 Using RapidAPI Instagram Scraper (no IP blocking)...")
 
-            # Build yt-dlp command to get reel URLs + metadata
-            profile_url = f"https://www.instagram.com/{username}/reels/"
-
-            # First: get list of reel URLs with yt-dlp --flat-playlist
-            self._add_message("📊 Scanning for reels...")
-
-            cmd = [
-                "yt-dlp",
-                "--flat-playlist",
-                "--dump-json",
-                "--no-warnings",
-                "--extractor-args", "instagram:max_comments=0",
-                profile_url,
-            ]
-
-            # Add login cookies if provided
-            cookies_file = self._get_cookies_file(ig_username, ig_password)
-            if cookies_file:
-                cmd.extend(["--cookies", cookies_file])
-                self._add_message("🔐 Using authenticated session...")
-
-            # Run yt-dlp to get reel list
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-
-            if result.returncode != 0:
-                error = result.stderr.strip()
-                if "429" in error or "Too Many Requests" in error:
-                    self._update(status="error", error="Instagram rate limit. Try again in 30 min or add login credentials.")
-                    self._add_message("❌ Rate limited! Add Instagram login to bypass.")
+            # Step 1: Get user info to get user_id
+            self._add_message("👤 Looking up profile...")
+            try:
+                info_data = self._api_request("info", {"username_or_id_or_url": username})
+            except http_requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    self._update(status="error", error=f"Profile @{username} not found.")
+                    self._add_message(f"❌ @{username} not found!")
                     return
-                elif "login" in error.lower() or "auth" in error.lower():
-                    self._update(status="error", error="Instagram requires login. Please add your credentials.")
-                    self._add_message("❌ Login required by Instagram.")
+                elif e.response.status_code == 429:
+                    self._update(status="error", error="API rate limit reached. Try again in a few minutes.")
+                    self._add_message("❌ API rate limit. Wait a minute and retry.")
                     return
-                else:
-                    # Try alternative: direct profile page
-                    self._add_message("⚠️ Reels tab failed, trying profile page...")
-                    cmd[len(cmd)-1] = f"https://www.instagram.com/{username}/"
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                elif e.response.status_code == 403:
+                    self._update(status="error", error="Invalid API key. Check RAPIDAPI_KEY env variable.")
+                    self._add_message("❌ Invalid API key!")
+                    return
+                raise
 
-            # Parse reel entries
-            entries = []
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    try:
-                        entry = json.loads(line)
-                        entries.append(entry)
-                    except json.JSONDecodeError:
-                        continue
+            user_data = info_data.get("data", {})
+            user_id = user_data.get("id")
+            full_name = user_data.get("full_name", username)
+            is_private = user_data.get("is_private", False)
 
-            if not entries:
-                self._update(status="error", error=f"No reels found for @{username}. Profile may be private or Instagram is blocking requests. Try adding login credentials.")
+            if is_private:
+                self._update(status="error", error=f"@{username} is a private account. Reels cannot be downloaded.")
+                self._add_message(f"🔒 @{username} is private!")
+                return
+
+            self._add_message(f"✅ Found: {full_name} (@{username})")
+
+            # Step 2: Fetch reels
+            self._add_message("📊 Scanning reels...")
+            self._update(status="scanning", progress=15)
+
+            all_reels = []
+            pagination_token = None
+            page = 0
+
+            while True:
+                page += 1
+                params = {"username_or_id_or_url": username}
+                if pagination_token:
+                    params["pagination_token"] = pagination_token
+
+                try:
+                    reels_data = self._api_request("reels", params)
+                except http_requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 429:
+                        self._add_message(f"⚠️ Rate limited after finding {len(all_reels)} reels. Downloading what we have...")
+                        break
+                    raise
+
+                items = reels_data.get("data", {}).get("items", [])
+                if not items:
+                    break
+
+                all_reels.extend(items)
+                self._add_message(f"📹 Found {len(all_reels)} reels so far... (page {page})")
+
+                pagination_token = reels_data.get("pagination_token")
+                if not pagination_token:
+                    break
+
+                # Small delay between pagination requests
+                time.sleep(1)
+
+            if not all_reels:
+                self._update(status="error", error=f"No reels found for @{username}.")
                 self._add_message("❌ No reels found!")
                 return
 
-            total_reels = len(entries)
-            self._add_message(f"📹 Found {total_reels} reels. Starting download...")
-            self._update(status="downloading", total=total_reels, downloaded=0)
+            total_reels = len(all_reels)
+            self._add_message(f"📹 Total: {total_reels} reels. Starting download...")
+            self._update(status="downloading", total=total_reels, downloaded=0, progress=20)
 
             captions = {}
             downloaded = 0
 
-            for i, entry in enumerate(entries):
+            for i, reel in enumerate(all_reels):
                 try:
-                    url = entry.get("url") or entry.get("webpage_url") or entry.get("original_url")
-                    if not url:
+                    # Extract video URL from reel data
+                    video_url = None
+
+                    # Try different possible structures
+                    video_versions = reel.get("video_versions", [])
+                    if video_versions:
+                        # Get highest quality
+                        video_url = video_versions[0].get("url")
+                    elif reel.get("video_url"):
+                        video_url = reel["video_url"]
+
+                    if not video_url:
+                        # Try nested structure
+                        media = reel.get("media", {})
+                        video_versions = media.get("video_versions", [])
+                        if video_versions:
+                            video_url = video_versions[0].get("url")
+
+                    if not video_url:
+                        self._add_message(f"⏭️ [{i+1}/{total_reels}] No video URL, skipping...")
                         continue
 
-                    title = entry.get("title") or entry.get("description", "")
-                    if title:
-                        first_line = title.split('\n')[0]
+                    # Get caption
+                    caption_data = reel.get("caption", {})
+                    if isinstance(caption_data, dict):
+                        caption_text = caption_data.get("text", "")
+                    elif isinstance(caption_data, str):
+                        caption_text = caption_data
+                    else:
+                        caption_text = ""
+
+                    # Create filename
+                    if caption_text:
+                        first_line = caption_text.split('\n')[0]
                         first_line = ' '.join(w for w in first_line.split() if not w.startswith('#'))
-                        if len(first_line) > 100:
-                            first_line = first_line[:100]
+                        if len(first_line) > 80:
+                            first_line = first_line[:80]
                         clean_title = self.sanitize_filename(first_line)
                     else:
-                        clean_title = entry.get("id", f"reel_{i+1}")
+                        clean_title = ""
 
+                    reel_id = reel.get("code") or reel.get("pk") or reel.get("id", f"reel_{i+1}")
                     if not clean_title:
-                        clean_title = entry.get("id", f"reel_{i+1}")
+                        clean_title = str(reel_id)
 
                     filename = f"{clean_title}.mp4"
                     filepath = self.videos_dir / filename
@@ -160,60 +226,47 @@ class WebReelDownloader:
                         continue
 
                     self._add_message(f"⬇️ [{i+1}/{total_reels}] {clean_title[:40]}...")
-                    self._update(downloaded=downloaded, progress=int((i / total_reels) * 90))
+                    progress = 20 + int((i / total_reels) * 70)
+                    self._update(downloaded=downloaded, progress=progress)
 
-                    # Download individual reel with yt-dlp
-                    dl_cmd = [
-                        "yt-dlp",
-                        "-f", "best[ext=mp4]/best",
-                        "--no-warnings",
-                        "--no-playlist",
-                        "--socket-timeout", "30",
-                        "--retries", "3",
-                        "--retry-sleep", "10",
-                        "-o", str(filepath),
-                        url,
-                    ]
+                    # Download video directly from Instagram CDN
+                    try:
+                        vid_resp = http_requests.get(
+                            video_url,
+                            stream=True,
+                            timeout=60,
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                        )
+                        vid_resp.raise_for_status()
 
-                    if cookies_file:
-                        dl_cmd.extend(["--cookies", cookies_file])
+                        with open(filepath, "wb") as f:
+                            for chunk in vid_resp.iter_content(chunk_size=8192):
+                                f.write(chunk)
 
-                    dl_result = subprocess.run(
-                        dl_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=90,
-                    )
+                        if filepath.exists() and filepath.stat().st_size > 1000:
+                            downloaded += 1
+                            self._add_message(f"✅ Downloaded: {clean_title[:40]}")
 
-                    if dl_result.returncode == 0 and filepath.exists():
-                        downloaded += 1
-                        self._add_message(f"✅ Downloaded: {clean_title[:40]}")
-
-                        # Save caption
-                        full_caption = entry.get("description", "")
-                        if full_caption:
-                            captions[filename] = full_caption
-                    else:
-                        error = dl_result.stderr.strip()
-                        if "429" in error:
-                            self._add_message(f"⚠️ Rate limited after {downloaded} reels. Packaging what we have...")
-                            break
+                            # Save caption
+                            if caption_text:
+                                captions[filename] = caption_text
                         else:
-                            self._add_message(f"❌ Failed: {error[:60]}")
+                            filepath.unlink(missing_ok=True)
+                            self._add_message(f"❌ [{i+1}] File too small, skipped")
 
-                    # Rate limit delay between downloads
-                    delay = random.uniform(3, 6)
-                    time.sleep(delay)
+                    except http_requests.exceptions.RequestException as e:
+                        self._add_message(f"❌ [{i+1}] Download failed: {str(e)[:50]}")
+                        continue
 
-                except subprocess.TimeoutExpired:
-                    self._add_message(f"⏱️ Timeout on reel {i+1}, skipping...")
-                    continue
+                    # Small delay between downloads
+                    time.sleep(random.uniform(0.5, 1.5))
+
                 except Exception as e:
-                    self._add_message(f"❌ Error: {str(e)[:60]}")
+                    self._add_message(f"❌ Error on reel {i+1}: {str(e)[:60]}")
                     continue
 
             if downloaded == 0:
-                self._update(status="error", error="Could not download any reels. Instagram may be blocking. Try adding login credentials or wait 30 min.")
+                self._update(status="error", error="Could not download any reels. Video URLs may have expired. Try again.")
                 self._add_message("❌ No reels downloaded!")
                 return
 
@@ -248,36 +301,12 @@ class WebReelDownloader:
                 zip_filename=f"{username}_reels.zip",
             )
 
-        except subprocess.TimeoutExpired:
-            self._update(status="error", error="Request timed out. Instagram may be slow. Try again later.")
-            self._add_message("❌ Timed out!")
+        except http_requests.exceptions.RequestException as e:
+            self._update(status="error", error=f"API error: {str(e)[:150]}")
+            self._add_message(f"❌ API error: {str(e)[:100]}")
         except Exception as e:
             self._update(status="error", error=str(e)[:200])
             self._add_message(f"❌ Error: {str(e)[:100]}")
-
-    def _get_cookies_file(self, ig_username=None, ig_password=None):
-        """Generate a cookies file from Instagram login."""
-        if not ig_username or not ig_password:
-            return None
-
-        cookies_path = self.task_dir / "cookies.txt"
-        try:
-            # Use yt-dlp's built-in login
-            cmd = [
-                "yt-dlp",
-                "--username", ig_username,
-                "--password", ig_password,
-                "--cookies", str(cookies_path),
-                "--skip-download",
-                "--no-warnings",
-                "https://www.instagram.com/instagram/",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if cookies_path.exists():
-                return str(cookies_path)
-        except Exception:
-            pass
-        return None
 
 
 def cleanup_old_tasks():
@@ -305,8 +334,6 @@ def start_download():
 
     data = request.get_json()
     raw_input = data.get("username", "").strip()
-    ig_username = data.get("ig_username", "").strip() or None
-    ig_password = data.get("ig_password", "").strip() or None
 
     if not raw_input:
         return jsonify({"error": "Please provide an Instagram username or URL"}), 400
@@ -320,6 +347,9 @@ def start_download():
     username = username.strip("/").strip()
     if not username:
         return jsonify({"error": "Could not extract username"}), 400
+
+    if not RAPIDAPI_KEY:
+        return jsonify({"error": "Server missing API key. Admin needs to set RAPIDAPI_KEY."}), 500
 
     task_id = str(uuid.uuid4())[:8]
 
@@ -338,7 +368,7 @@ def start_download():
 
     def run():
         downloader = WebReelDownloader(task_id)
-        downloader.download_reels(username, ig_username, ig_password)
+        downloader.download_reels(username)
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
