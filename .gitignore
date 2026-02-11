@@ -1,0 +1,26 @@
+# Ignore downloaded videos
+videos/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Session files
+session-*
+
+# OS
+.DS_Store
+Thumbs.db

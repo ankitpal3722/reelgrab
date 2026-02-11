@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ReelGrab — Instagram Reel Downloader</title>
+    <meta name="description" content="Download all Instagram reels from any public profile. Get videos with captions in a single zip file.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Animated background -->
+    <div class="bg-gradient"></div>
+    <div class="bg-grid"></div>
+
+    <main class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="23 7 16 12 23 17 23 7"/>
+                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1>ReelGrab</h1>
+                    <p class="tagline">Instagram Reel Downloader</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Input Section -->
+        <section id="input-section" class="card input-card">
+            <h2>Download Reels from any Profile</h2>
+            <p class="subtitle">Enter an Instagram username or profile URL to download all reels with captions.</p>
+
+            <div class="input-group">
+                <div class="input-wrapper">
+                    <span class="input-icon">@</span>
+                    <input
+                        type="text"
+                        id="username-input"
+                        placeholder="username or instagram.com/username"
+                        autocomplete="off"
+                        spellcheck="false"
+                    >
+                </div>
+                <button id="download-btn" onclick="startDownload()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    <span>Download</span>
+                </button>
+            </div>
+
+            <div class="features">
+                <div class="feature">
+                    <span class="feature-icon">📹</span>
+                    <span>All Reels</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">📝</span>
+                    <span>With Captions</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">📦</span>
+                    <span>Zipped</span>
+                </div>
+                <div class="feature">
+                    <span class="feature-icon">⚡</span>
+                    <span>Fast</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Progress Section (hidden by default) -->
+        <section id="progress-section" class="card progress-card" style="display: none;">
+            <div class="progress-header">
+                <h2 id="progress-title">Fetching profile...</h2>
+                <span id="progress-badge" class="badge">Starting</span>
+            </div>
+
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progress-bar">
+                    <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                </div>
+                <span class="progress-text" id="progress-text">0%</span>
+            </div>
+
+            <div class="stats-row" id="stats-row" style="display: none;">
+                <div class="stat">
+                    <span class="stat-value" id="stat-downloaded">0</span>
+                    <span class="stat-label">Downloaded</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-value" id="stat-total">0</span>
+                    <span class="stat-label">Total Reels</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-value" id="stat-size">—</span>
+                    <span class="stat-label">Zip Size</span>
+                </div>
+            </div>
+
+            <div class="log-container">
+                <div class="log-header">
+                    <span>📋 Activity Log</span>
+                    <span class="log-count" id="log-count">0 events</span>
+                </div>
+                <div class="log" id="log"></div>
+            </div>
+
+            <!-- Download Ready -->
+            <div id="download-ready" style="display: none;">
+                <button id="zip-download-btn" class="download-ready-btn" onclick="downloadZip()">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    <span>Download ZIP</span>
+                    <span id="zip-size" class="zip-size"></span>
+                </button>
+            </div>
+
+            <!-- Error State -->
+            <div id="error-section" style="display: none;">
+                <div class="error-box">
+                    <span>❌</span>
+                    <p id="error-message"></p>
+                </div>
+            </div>
+
+            <button class="reset-btn" onclick="resetUI()">← Start new download</button>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>⚠️ For personal use only. Respect content creators' rights.</p>
+            <p>Uses <a href="https://instaloader.github.io/" target="_blank">Instaloader</a> • Public profiles only</p>
+        </footer>
+    </main>
+
+    <script>
+        let currentTaskId = null;
+        let eventSource = null;
+
+        const inputSection = document.getElementById("input-section");
+        const progressSection = document.getElementById("progress-section");
+        const usernameInput = document.getElementById("username-input");
+        const downloadBtn = document.getElementById("download-btn");
+
+        // Enter key support
+        usernameInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") startDownload();
+        });
+
+        async function startDownload() {
+            const username = usernameInput.value.trim();
+            if (!username) {
+                usernameInput.style.borderColor = "#ef4444";
+                usernameInput.focus();
+                setTimeout(() => usernameInput.style.borderColor = "", 2000);
+                return;
+            }
+
+            // Switch to progress view
+            inputSection.style.display = "none";
+            progressSection.style.display = "block";
+            document.getElementById("download-ready").style.display = "none";
+            document.getElementById("error-section").style.display = "none";
+            document.getElementById("log").innerHTML = "";
+            document.getElementById("stats-row").style.display = "none";
+
+            try {
+                const res = await fetch("/download", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username }),
+                });
+
+                const data = await res.json();
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+
+                currentTaskId = data.task_id;
+                document.getElementById("progress-title").textContent = `Downloading @${data.username}`;
+                connectSSE(data.task_id);
+
+            } catch (err) {
+                showError("Failed to connect to server. Please try again.");
+            }
+        }
+
+        function connectSSE(taskId) {
+            if (eventSource) eventSource.close();
+
+            eventSource = new EventSource(`/progress/${taskId}`);
+            let logCount = 0;
+
+            eventSource.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+
+                if (data.error && data.status !== "error") {
+                    showError(data.error);
+                    eventSource.close();
+                    return;
+                }
+
+                // Update progress bar
+                const fill = document.getElementById("progress-fill");
+                const text = document.getElementById("progress-text");
+                fill.style.width = data.progress + "%";
+                text.textContent = data.progress + "%";
+
+                // Update badge
+                const badge = document.getElementById("progress-badge");
+                const statusMap = {
+                    starting: "Starting",
+                    fetching: "Fetching",
+                    scanning: "Scanning",
+                    downloading: "Downloading",
+                    zipping: "Zipping",
+                    done: "Complete ✓",
+                    error: "Failed ✗",
+                };
+                badge.textContent = statusMap[data.status] || data.status;
+                badge.className = "badge badge-" + data.status;
+
+                // Update stats
+                if (data.total > 0) {
+                    document.getElementById("stats-row").style.display = "flex";
+                    document.getElementById("stat-downloaded").textContent = data.downloaded;
+                    document.getElementById("stat-total").textContent = data.total;
+                }
+
+                // Add log messages
+                const log = document.getElementById("log");
+                data.messages.forEach((msg) => {
+                    const div = document.createElement("div");
+                    div.className = "log-entry";
+                    div.textContent = msg;
+                    log.appendChild(div);
+                    logCount++;
+                });
+                log.scrollTop = log.scrollHeight;
+                document.getElementById("log-count").textContent = logCount + " events";
+
+                // Done state
+                if (data.status === "done") {
+                    eventSource.close();
+                    document.getElementById("stat-size").textContent = data.zip_size + " MB";
+                    document.getElementById("zip-size").textContent = data.zip_size + " MB";
+                    document.getElementById("download-ready").style.display = "block";
+                    fill.classList.add("done");
+                }
+
+                // Error state
+                if (data.status === "error") {
+                    eventSource.close();
+                    showError(data.error || "An unknown error occurred.");
+                }
+            };
+
+            eventSource.onerror = () => {
+                eventSource.close();
+            };
+        }
+
+        function downloadZip() {
+            if (currentTaskId) {
+                window.location.href = `/download/${currentTaskId}`;
+            }
+        }
+
+        function showError(message) {
+            document.getElementById("error-section").style.display = "block";
+            document.getElementById("error-message").textContent = message;
+            const badge = document.getElementById("progress-badge");
+            badge.textContent = "Failed ✗";
+            badge.className = "badge badge-error";
+        }
+
+        function resetUI() {
+            if (eventSource) eventSource.close();
+            currentTaskId = null;
+            progressSection.style.display = "none";
+            inputSection.style.display = "block";
+            usernameInput.value = "";
+            usernameInput.focus();
+            document.getElementById("progress-fill").style.width = "0%";
+            document.getElementById("progress-fill").classList.remove("done");
+            document.getElementById("progress-text").textContent = "0%";
+        }
+    </script>
+</body>
+</html>
