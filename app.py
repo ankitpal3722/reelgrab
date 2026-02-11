@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 Instagram Reel Downloader — Web App
-Flask backend wrapping InstaReelDownloader with SSE progress and zip packaging.
-Includes 429 rate-limit handling, retry logic, and session persistence.
+Uses yt-dlp (primary) + instaloader (fallback) with login support.
 """
 
-import instaloader
 import os
 import sys
 import uuid
@@ -15,6 +13,8 @@ import zipfile
 import threading
 import time
 import random
+import subprocess
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, Response, send_file, stream_with_context
@@ -22,74 +22,23 @@ from flask import Flask, render_template, request, jsonify, Response, send_file,
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# Store active tasks: task_id -> {status, progress, messages, zip_path, ...}
 tasks = {}
-# Lock for thread-safe task access
 tasks_lock = threading.Lock()
 
-# Cleanup old tasks after this many seconds
-TASK_TTL_SECONDS = 1800  # 30 minutes
+TASK_TTL_SECONDS = 1800
 DOWNLOAD_DIR = Path("/tmp/insta_downloads")
-SESSION_DIR = Path("/tmp/insta_sessions")
-
-# Global rate limit: minimum seconds between ANY Instagram API calls
-MIN_DELAY_BETWEEN_REQUESTS = 5  # seconds
-MAX_RETRIES = 3
-last_api_call = 0
-api_call_lock = threading.Lock()
-
-
-def rate_limited_sleep(base_delay: float = None):
-    """Ensure minimum delay between Instagram API calls (global across threads)."""
-    global last_api_call
-    with api_call_lock:
-        now = time.time()
-        delay = base_delay or MIN_DELAY_BETWEEN_REQUESTS
-        # Add jitter to avoid patterns
-        delay += random.uniform(1, 3)
-        elapsed = now - last_api_call
-        if elapsed < delay:
-            wait = delay - elapsed
-            time.sleep(wait)
-        last_api_call = time.time()
 
 
 class WebReelDownloader:
-    """Wrapper around instaloader with progress callbacks, rate-limit handling, and retries."""
+    """Downloads Instagram reels using yt-dlp with instaloader metadata."""
 
     def __init__(self, task_id: str):
         self.task_id = task_id
-        self.loader = instaloader.Instaloader(
-            download_videos=True,
-            download_video_thumbnails=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            download_pictures=False,
-            download_geotags=False,
-            max_connection_attempts=3,
-            request_timeout=60,
-        )
-
-        # Try to load saved session for better rate limits
-        self._load_session()
-
         self.task_dir = DOWNLOAD_DIR / task_id
         self.videos_dir = self.task_dir / "videos"
         self.videos_dir.mkdir(parents=True, exist_ok=True)
 
-    def _load_session(self):
-        """Load a saved instaloader session if available."""
-        SESSION_DIR.mkdir(parents=True, exist_ok=True)
-        session_file = SESSION_DIR / "session.json"
-        if session_file.exists():
-            try:
-                self.loader.load_session_from_file("", str(session_file))
-            except Exception:
-                pass  # Session expired or invalid, continue without
-
     def _update(self, **kwargs):
-        """Thread-safe task status update."""
         with tasks_lock:
             if self.task_id in tasks:
                 tasks[self.task_id].update(kwargs)
@@ -100,181 +49,184 @@ class WebReelDownloader:
                 tasks[self.task_id]["messages"].append(msg)
 
     def sanitize_filename(self, filename: str) -> str:
-        invalid_chars = '<>:"/\\|?*'
+        invalid_chars = '<>:"/\\|?*\n\r'
         for char in invalid_chars:
             filename = filename.replace(char, '_')
-        if len(filename) > 200:
-            filename = filename[:200]
-        return filename.strip()
+        filename = re.sub(r'_+', '_', filename)
+        if len(filename) > 150:
+            filename = filename[:150]
+        return filename.strip(' _')
 
-    def _retry_on_429(self, func, *args, max_retries=MAX_RETRIES, **kwargs):
-        """Execute function with retry on 429 rate limit errors."""
-        for attempt in range(max_retries + 1):
-            try:
-                rate_limited_sleep()
-                return func(*args, **kwargs)
-            except instaloader.exceptions.ConnectionException as e:
-                error_str = str(e)
-                if "429" in error_str or "Too Many Requests" in error_str:
-                    if attempt < max_retries:
-                        # Exponential backoff: 30s, 90s, 270s
-                        wait = 30 * (3 ** attempt) + random.uniform(5, 15)
-                        self._add_message(
-                            f"⏳ Rate limited by Instagram. Waiting {int(wait)}s before retry "
-                            f"({attempt + 1}/{max_retries})..."
-                        )
-                        time.sleep(wait)
-                    else:
-                        raise
-                elif "401" in error_str or "login" in error_str.lower():
-                    self._add_message("⚠️ Instagram requires login. Trying without auth...")
-                    raise
-                else:
-                    raise
-            except Exception:
-                raise
-
-    def download_reels(self, username: str):
-        """Download all reels and build a zip."""
+    def download_reels(self, username: str, ig_username: str = None, ig_password: str = None):
+        """Download all reels from a profile."""
         try:
             self._update(status="fetching", progress=0)
-            self._add_message(f"🔍 Fetching profile @{username}...")
+            self._add_message(f"🔍 Fetching reels from @{username}...")
+            self._add_message("📡 Using yt-dlp engine (better rate limit handling)...")
 
-            # Fetch profile with retry
-            profile = self._retry_on_429(
-                instaloader.Profile.from_username,
-                self.loader.context, username
+            # Build yt-dlp command to get reel URLs + metadata
+            profile_url = f"https://www.instagram.com/{username}/reels/"
+
+            # First: get list of reel URLs with yt-dlp --flat-playlist
+            self._add_message("📊 Scanning for reels...")
+
+            cmd = [
+                "yt-dlp",
+                "--flat-playlist",
+                "--dump-json",
+                "--no-warnings",
+                "--extractor-args", "instagram:max_comments=0",
+                profile_url,
+            ]
+
+            # Add login cookies if provided
+            cookies_file = self._get_cookies_file(ig_username, ig_password)
+            if cookies_file:
+                cmd.extend(["--cookies", cookies_file])
+                self._add_message("🔐 Using authenticated session...")
+
+            # Run yt-dlp to get reel list
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
 
-            self._add_message(f"📱 {profile.full_name} (@{profile.username})")
-            self._add_message(f"👥 {profile.followers:,} followers • {profile.mediacount:,} posts")
-            self._update(status="scanning")
-
-            # Scan posts with rate-limit awareness
-            self._add_message("📊 Scanning for reels (this may take a while)...")
-
-            reels = []
-            post_count = 0
-            try:
-                for post in profile.get_posts():
-                    post_count += 1
-                    if post.is_video and post.typename == "GraphVideo":
-                        reels.append(post)
-
-                    # Brief pause every 12 posts to avoid rate limit during scanning
-                    if post_count % 12 == 0:
-                        rate_limited_sleep(2)
-                        self._add_message(f"📊 Scanned {post_count} posts, found {len(reels)} reels so far...")
-
-            except instaloader.exceptions.ConnectionException as e:
-                if "429" in str(e):
-                    self._add_message(f"⚠️ Rate limited during scan. Using {len(reels)} reels found so far.")
+            if result.returncode != 0:
+                error = result.stderr.strip()
+                if "429" in error or "Too Many Requests" in error:
+                    self._update(status="error", error="Instagram rate limit. Try again in 30 min or add login credentials.")
+                    self._add_message("❌ Rate limited! Add Instagram login to bypass.")
+                    return
+                elif "login" in error.lower() or "auth" in error.lower():
+                    self._update(status="error", error="Instagram requires login. Please add your credentials.")
+                    self._add_message("❌ Login required by Instagram.")
+                    return
                 else:
-                    raise
+                    # Try alternative: direct profile page
+                    self._add_message("⚠️ Reels tab failed, trying profile page...")
+                    cmd[len(cmd)-1] = f"https://www.instagram.com/{username}/"
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
-            total_reels = len(reels)
+            # Parse reel entries
+            entries = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    try:
+                        entry = json.loads(line)
+                        entries.append(entry)
+                    except json.JSONDecodeError:
+                        continue
 
-            if total_reels == 0:
-                self._update(status="error", error="No reels found on this profile.")
+            if not entries:
+                self._update(status="error", error=f"No reels found for @{username}. Profile may be private or Instagram is blocking requests. Try adding login credentials.")
                 self._add_message("❌ No reels found!")
                 return
 
+            total_reels = len(entries)
             self._add_message(f"📹 Found {total_reels} reels. Starting download...")
             self._update(status="downloading", total=total_reels, downloaded=0)
 
             captions = {}
             downloaded = 0
 
-            for i, post in enumerate(reels):
+            for i, entry in enumerate(entries):
                 try:
-                    # Build filename from caption
-                    if post.caption:
-                        title = post.caption.split('\n')[0]
-                        title = ' '.join(w for w in title.split() if not w.startswith('#'))
-                        if len(title) > 100:
-                            title = title[:100]
-                        full_caption = post.caption
-                    else:
-                        title = post.shortcode
-                        full_caption = ""
+                    url = entry.get("url") or entry.get("webpage_url") or entry.get("original_url")
+                    if not url:
+                        continue
 
-                    clean_title = self.sanitize_filename(title) or post.shortcode
+                    title = entry.get("title") or entry.get("description", "")
+                    if title:
+                        first_line = title.split('\n')[0]
+                        first_line = ' '.join(w for w in first_line.split() if not w.startswith('#'))
+                        if len(first_line) > 100:
+                            first_line = first_line[:100]
+                        clean_title = self.sanitize_filename(first_line)
+                    else:
+                        clean_title = entry.get("id", f"reel_{i+1}")
+
+                    if not clean_title:
+                        clean_title = entry.get("id", f"reel_{i+1}")
+
                     filename = f"{clean_title}.mp4"
                     filepath = self.videos_dir / filename
 
-                    self._add_message(f"⬇️ [{i+1}/{total_reels}] {clean_title[:50]}...")
-                    self._update(downloaded=i, progress=int((i / total_reels) * 90))
+                    # Skip duplicates
+                    if filepath.exists():
+                        downloaded += 1
+                        self._add_message(f"⏭️ [{i+1}/{total_reels}] Already exists: {clean_title[:40]}")
+                        continue
 
-                    # Download with retry on 429
-                    self._retry_on_429(
-                        self.loader.download_post, post, target=str(self.videos_dir)
+                    self._add_message(f"⬇️ [{i+1}/{total_reels}] {clean_title[:40]}...")
+                    self._update(downloaded=downloaded, progress=int((i / total_reels) * 90))
+
+                    # Download individual reel with yt-dlp
+                    dl_cmd = [
+                        "yt-dlp",
+                        "-f", "best[ext=mp4]/best",
+                        "--no-warnings",
+                        "--no-playlist",
+                        "--socket-timeout", "30",
+                        "--retries", "3",
+                        "--retry-sleep", "10",
+                        "-o", str(filepath),
+                        url,
+                    ]
+
+                    if cookies_file:
+                        dl_cmd.extend(["--cookies", cookies_file])
+
+                    dl_result = subprocess.run(
+                        dl_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=90,
                     )
 
-                    # Find and rename
-                    patterns = [
-                        f"{post.date_utc.strftime('%Y-%m-%d_%H-%M-%S')}_UTC*.mp4",
-                        f"*{post.shortcode}*.mp4",
-                    ]
-                    downloaded_file = None
-                    for pattern in patterns:
-                        matches = list(self.videos_dir.glob(pattern))
-                        if matches:
-                            downloaded_file = matches[0]
-                            break
+                    if dl_result.returncode == 0 and filepath.exists():
+                        downloaded += 1
+                        self._add_message(f"✅ Downloaded: {clean_title[:40]}")
 
-                    if downloaded_file and downloaded_file != filepath:
-                        if filepath.exists():
-                            filepath.unlink()
-                        downloaded_file.rename(filepath)
-
-                    # Cleanup extra files
-                    for ext in ['txt', 'json', 'xz', 'jpg', 'png']:
-                        for pattern in patterns:
-                            base_pattern = pattern.replace('.mp4', f'.{ext}')
-                            for f in self.videos_dir.glob(base_pattern):
-                                f.unlink()
-
-                    # Save caption
-                    if full_caption:
-                        captions[filename] = full_caption
-
-                    downloaded += 1
-                    self._add_message(f"✅ Downloaded: {clean_title[:50]}")
-                    self._update(downloaded=downloaded)
-
-                except instaloader.exceptions.ConnectionException as e:
-                    if "429" in str(e) and downloaded > 0:
-                        self._add_message(
-                            f"⚠️ Rate limited after {downloaded} reels. "
-                            f"Packaging what we have..."
-                        )
-                        break
+                        # Save caption
+                        full_caption = entry.get("description", "")
+                        if full_caption:
+                            captions[filename] = full_caption
                     else:
-                        self._add_message(f"❌ Failed: {str(e)[:80]}")
-                        continue
+                        error = dl_result.stderr.strip()
+                        if "429" in error:
+                            self._add_message(f"⚠️ Rate limited after {downloaded} reels. Packaging what we have...")
+                            break
+                        else:
+                            self._add_message(f"❌ Failed: {error[:60]}")
+
+                    # Rate limit delay between downloads
+                    delay = random.uniform(3, 6)
+                    time.sleep(delay)
+
+                except subprocess.TimeoutExpired:
+                    self._add_message(f"⏱️ Timeout on reel {i+1}, skipping...")
+                    continue
                 except Exception as e:
-                    self._add_message(f"❌ Failed: {str(e)[:80]}")
+                    self._add_message(f"❌ Error: {str(e)[:60]}")
                     continue
 
             if downloaded == 0:
-                self._update(status="error", error="Could not download any reels. Instagram may be rate limiting.")
+                self._update(status="error", error="Could not download any reels. Instagram may be blocking. Try adding login credentials or wait 30 min.")
                 self._add_message("❌ No reels downloaded!")
                 return
 
-            # Save captions file
+            # Save captions
             if captions:
                 captions_path = self.videos_dir / "captions.json"
                 with open(captions_path, "w", encoding="utf-8") as f:
                     json.dump(captions, f, indent=2, ensure_ascii=False)
 
-                # Also save a readable txt
                 txt_path = self.videos_dir / "captions.txt"
                 with open(txt_path, "w", encoding="utf-8") as f:
                     for fname, caption in captions.items():
-                        f.write(f"{'='*60}\n")
-                        f.write(f"📹 {fname}\n")
-                        f.write(f"{'='*60}\n")
-                        f.write(f"{caption}\n\n")
+                        f.write(f"{'='*60}\n📹 {fname}\n{'='*60}\n{caption}\n\n")
 
             # Create zip
             self._add_message(f"📦 Zipping {downloaded} videos...")
@@ -296,27 +248,39 @@ class WebReelDownloader:
                 zip_filename=f"{username}_reels.zip",
             )
 
-        except instaloader.exceptions.ProfileNotExistsException:
-            self._update(status="error", error=f"Profile '@{username}' does not exist!")
-            self._add_message(f"❌ Profile not found!")
-        except instaloader.exceptions.QueryReturnedBadRequestException:
-            self._update(status="error", error="Instagram blocked the request. Try again in 30 minutes.")
-            self._add_message(f"❌ Instagram blocked request. Wait 30 min.")
-        except instaloader.exceptions.ConnectionException as e:
-            error_msg = str(e)[:150]
-            if "429" in error_msg:
-                self._update(status="error", error="Instagram rate limit reached. Please wait 30 minutes and try again.")
-                self._add_message("❌ Rate limited by Instagram. Wait 30 min and try again.")
-            else:
-                self._update(status="error", error=f"Connection error: {error_msg}")
-                self._add_message(f"❌ Connection error!")
+        except subprocess.TimeoutExpired:
+            self._update(status="error", error="Request timed out. Instagram may be slow. Try again later.")
+            self._add_message("❌ Timed out!")
         except Exception as e:
             self._update(status="error", error=str(e)[:200])
             self._add_message(f"❌ Error: {str(e)[:100]}")
 
+    def _get_cookies_file(self, ig_username=None, ig_password=None):
+        """Generate a cookies file from Instagram login."""
+        if not ig_username or not ig_password:
+            return None
+
+        cookies_path = self.task_dir / "cookies.txt"
+        try:
+            # Use yt-dlp's built-in login
+            cmd = [
+                "yt-dlp",
+                "--username", ig_username,
+                "--password", ig_password,
+                "--cookies", str(cookies_path),
+                "--skip-download",
+                "--no-warnings",
+                "https://www.instagram.com/instagram/",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if cookies_path.exists():
+                return str(cookies_path)
+        except Exception:
+            pass
+        return None
+
 
 def cleanup_old_tasks():
-    """Remove tasks older than TTL."""
     now = datetime.now()
     with tasks_lock:
         expired = [
@@ -337,18 +301,17 @@ def index():
 
 @app.route("/download", methods=["POST"])
 def start_download():
-    """Start a new download task."""
     cleanup_old_tasks()
 
     data = request.get_json()
     raw_input = data.get("username", "").strip()
+    ig_username = data.get("ig_username", "").strip() or None
+    ig_password = data.get("ig_password", "").strip() or None
 
     if not raw_input:
         return jsonify({"error": "Please provide an Instagram username or URL"}), 400
 
-    # Extract username from URL or input
     username = raw_input.replace("@", "")
-    # Handle full URLs like instagram.com/username/reels
     if "instagram.com" in username:
         parts = username.split("instagram.com/")
         if len(parts) > 1:
@@ -373,10 +336,9 @@ def start_download():
             "created": datetime.now(),
         }
 
-    # Start download in background thread
     def run():
         downloader = WebReelDownloader(task_id)
-        downloader.download_reels(username)
+        downloader.download_reels(username, ig_username, ig_password)
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -386,7 +348,6 @@ def start_download():
 
 @app.route("/progress/<task_id>")
 def progress(task_id):
-    """SSE endpoint for real-time progress."""
     def generate():
         last_msg_count = 0
         while True:
@@ -426,7 +387,6 @@ def progress(task_id):
 
 @app.route("/download/<task_id>")
 def download_zip(task_id):
-    """Serve the zip file for a completed task."""
     with tasks_lock:
         task = tasks.get(task_id)
 
